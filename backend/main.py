@@ -1,6 +1,8 @@
+import asyncio
 from datetime import date, datetime, time, timedelta
 
-from fastapi import APIRouter, FastAPI, Depends, HTTPException
+from fastapi import APIRouter, FastAPI, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -47,6 +49,49 @@ app.include_router(kaiten_router)
 
 # All business endpoints require authentication
 api = APIRouter(dependencies=[Depends(get_current_user)])
+
+# ---------------------------------------------------------------------------
+# SSE pub/sub
+# ---------------------------------------------------------------------------
+
+_subscribers: dict[int, set[asyncio.Queue]] = {}
+
+
+def _notify(conference_id: int) -> None:
+    for q in _subscribers.get(conference_id, set()):
+        try:
+            q.put_nowait("update")
+        except asyncio.QueueFull:
+            pass
+
+
+@api.get("/conferences/{conference_id}/events")
+async def conference_events(
+    conference_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    async def generator():
+        q: asyncio.Queue = asyncio.Queue(maxsize=20)
+        _subscribers.setdefault(conference_id, set()).add(q)
+        try:
+            yield "data: connected\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=25)
+                    yield f"data: {msg}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            _subscribers.get(conference_id, set()).discard(q)
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +149,26 @@ def _check_talk_vs_breaks(
             )
 
 
+def _check_talk_vs_talks(
+    start: time, end: time, hall_id: int, day: models.ConferenceDay,
+    exclude_talk_id: int | None = None,
+) -> None:
+    for talk in day.talks:
+        if talk.hall_id != hall_id or talk.id == exclude_talk_id:
+            continue
+        if talk.start_time is None or talk.end_time is None:
+            continue
+        overlap = _overlap_seconds(start, end, talk.start_time, talk.end_time)
+        if overlap > MAX_OVERLAP_SECONDS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Talk overlaps talk \"{talk.title}\" {talk.start_time}–{talk.end_time} "
+                    f"by {int(overlap)}s (max {MAX_OVERLAP_SECONDS})"
+                ),
+            )
+
+
 def _check_break_vs_talks_and_breaks(
     start: time,
     end: time,
@@ -146,10 +211,38 @@ def _sync_days(conference: models.Conference, db: Session) -> None:
     existing: dict[date, models.ConferenceDay] = {d.date: d for d in conference.days}
     new_dates = set(_date_range(conference.start_date, conference.end_date))
 
-    for d in list(conference.days):
-        if d.date not in new_dates:
-            conference.days.remove(d)
-            db.delete(d)
+    removed_dates = set(existing.keys()) - new_dates
+
+    if removed_dates:
+        # Find the anchor day to receive unassigned talks from removed days
+        staying_days = sorted(
+            [day for dt, day in existing.items() if dt not in removed_dates],
+            key=lambda x: x.date,
+        )
+        if staying_days:
+            anchor_day = staying_days[0]
+        else:
+            # All existing days are removed — create the first new day now so talks have a home
+            first_new_date = min(new_dates)
+            anchor_day = models.ConferenceDay(date=first_new_date)
+            conference.days.append(anchor_day)
+            db.flush()
+            # Mark as already added so the bottom loop doesn't create a duplicate
+            existing[first_new_date] = anchor_day
+
+        for dt in removed_dates:
+            day = existing[dt]
+            talk_ids = [t.id for t in day.talks]
+            if talk_ids:
+                db.query(models.Talk).filter(models.Talk.id.in_(talk_ids)).update(
+                    {"hall_id": None, "start_time": None, "end_time": None, "day_id": anchor_day.id},
+                    synchronize_session=False,
+                )
+                db.flush()
+            # Expire so SQLAlchemy re-reads day.talks from DB (now empty) before cascade delete
+            db.expire(day)
+            conference.days.remove(day)
+            db.delete(day)
 
     for d in new_dates:
         if d not in existing:
@@ -175,6 +268,7 @@ def create_conference(data: schemas.ConferenceCreate, db: Session = Depends(get_
     _log(f"Создана конференция «{conference.name}»", db, cu.username)
     db.commit()
     db.refresh(conference)
+    _notify(conference.id)
     return conference
 
 
@@ -199,12 +293,22 @@ def update_conference(
         setattr(conference, field, value)
 
     if data.tracks is not None:
-        conference.tracks = [models.Track(**t.model_dump()) for t in data.tracks]
+        existing_by_name = {t.name: t for t in conference.tracks}
+        new_tracks = []
+        for track_data in data.tracks:
+            if track_data.name in existing_by_name:
+                existing = existing_by_name[track_data.name]
+                existing.slots = track_data.slots
+                new_tracks.append(existing)
+            else:
+                new_tracks.append(models.Track(**track_data.model_dump()))
+        conference.tracks = new_tracks
 
     _sync_days(conference, db)
     _log(f"Обновлена конференция «{conference.name}»", db, cu.username)
     db.commit()
     db.refresh(conference)
+    _notify(conference_id)
     return conference
 
 
@@ -216,6 +320,7 @@ def delete_conference(conference_id: int, db: Session = Depends(get_db), cu: mod
     _log(f"Удалена конференция «{conference.name}»", db, cu.username)
     db.delete(conference)
     db.commit()
+    _notify(conference_id)
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +340,7 @@ def create_hall(
     _log(f"Добавлен зал «{hall.name}» в конференцию «{conference.name}»", db, cu.username)
     db.commit()
     db.refresh(hall)
+    _notify(conference_id)
     return hall
 
 
@@ -243,11 +349,17 @@ def delete_hall(hall_id: int, db: Session = Depends(get_db), cu: models.User = D
     hall = db.get(models.Hall, hall_id)
     if not hall:
         raise HTTPException(status_code=404, detail="Hall not found")
-    db.query(models.Talk).filter(models.Talk.hall_id == hall_id).delete()
-    db.query(models.Break).filter(models.Break.hall_id == hall_id).delete()
-    _log(f"Удалён зал «{hall.name}» (каскадно удалены все доклады и перерывы)", db, cu.username)
+    db.query(models.Talk).filter(models.Talk.hall_id == hall_id).update(
+        {"hall_id": None, "start_time": None, "end_time": None},
+        synchronize_session=False,
+    )
+    db.query(models.Break).filter(models.Break.hall_id == hall_id).delete(synchronize_session=False)
+    db.flush()
+    conf_id = hall.conference_id
+    _log(f"Удалён зал «{hall.name}» (доклады возвращены в очередь)", db, cu.username)
     db.delete(hall)
     db.commit()
+    _notify(conf_id)
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +390,7 @@ def create_talk(
         _check_track_in_conference(track_id, conference_id, db)
         track_objs.append(db.get(models.Track, track_id))
     _check_talk_vs_breaks(data.start_time, data.end_time, data.hall_id, day)
+    _check_talk_vs_talks(data.start_time, data.end_time, data.hall_id, day)
 
     hall = db.get(models.Hall, data.hall_id)
     talk = models.Talk(**data.model_dump(exclude={"track_ids"}), day_id=day_id)
@@ -287,6 +400,7 @@ def create_talk(
     _log(f"Добавлен доклад «{talk.title}» в зал «{hall.name}» ({day.date})", db, cu.username)
     db.commit()
     db.refresh(talk)
+    _notify(conference_id)
     return talk
 
 
@@ -315,6 +429,7 @@ def create_unassigned_talk(
     _log(f"Создан доклад «{talk.title}» (без зала)", db, cu.username)
     db.commit()
     db.refresh(talk)
+    _notify(conference_id)
     return talk
 
 
@@ -351,14 +466,16 @@ def update_talk(talk_id: int, data: schemas.TalkUpdate, db: Session = Depends(ge
     effective_end = data.end_time if data.end_time is not None else talk.end_time
     if effective_hall_id is not None and effective_start is not None and effective_end is not None:
         _check_talk_vs_breaks(effective_start, effective_end, effective_hall_id, effective_day)
+        _check_talk_vs_talks(effective_start, effective_end, effective_hall_id, effective_day, exclude_talk_id=talk_id)
 
-    for field, value in data.model_dump(exclude_none=True, exclude={"track_ids", "primary_track_id"}).items():
+    for field, value in data.model_dump(exclude_unset=True, exclude={"track_ids", "primary_track_id"}).items():
         setattr(talk, field, value)
 
     placed = talk.hall_id is not None and talk.start_time is not None
     _log(f"Обновлён доклад «{talk.title}»" + (f" ({talk.start_time}–{talk.end_time})" if placed else " (без зала)"), db, cu.username)
     db.commit()
     db.refresh(talk)
+    _notify(talk.day.conference_id)
     return talk
 
 
@@ -367,9 +484,11 @@ def delete_talk(talk_id: int, db: Session = Depends(get_db), cu: models.User = D
     talk = db.get(models.Talk, talk_id)
     if not talk:
         raise HTTPException(status_code=404, detail="Talk not found")
+    conf_id = talk.day.conference_id
     _log(f"Удалён доклад «{talk.title}»", db, cu.username)
     db.delete(talk)
     db.commit()
+    _notify(conf_id)
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +521,7 @@ def create_break(
     _log(f"Добавлен перерыв {br.start_time}–{br.end_time} в зал «{hall.name}» ({day.date})", db, cu.username)
     db.commit()
     db.refresh(br)
+    _notify(conference_id)
     return br
 
 
@@ -437,6 +557,7 @@ def update_break(break_id: int, data: schemas.BreakUpdate, db: Session = Depends
     _log(f"Обновлён перерыв {br.start_time}–{br.end_time}", db, cu.username)
     db.commit()
     db.refresh(br)
+    _notify(conference_id)
     return br
 
 
@@ -445,9 +566,11 @@ def delete_break(break_id: int, db: Session = Depends(get_db), cu: models.User =
     br = db.get(models.Break, break_id)
     if not br:
         raise HTTPException(status_code=404, detail="Break not found")
+    conf_id = br.day.conference_id
     _log(f"Удалён перерыв {br.start_time}–{br.end_time}", db, cu.username)
     db.delete(br)
     db.commit()
+    _notify(conf_id)
 
 
 # ---------------------------------------------------------------------------

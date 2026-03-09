@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import type { Conference, DayDetails, Hall, Track, TalkItem, BreakItem } from '../types'
-import { getConferences } from '../api/conferences'
+import { getConferences, updateConference } from '../api/conferences'
 import {
   createHall, deleteHall,
   createTalk, createUnassignedTalk, updateTalk, deleteTalk,
@@ -23,7 +23,13 @@ const TOTAL_SLOTS = (GRID_END - GRID_START) / SLOT_MIN  // 30
 
 const SLOTS = Array.from({ length: TOTAL_SLOTS }, (_, i) => {
   const totalMin = GRID_START + i * SLOT_MIN
-  return { index: i, totalMin, isHour: totalMin % 60 === 0 }
+  return {
+    index: i,
+    totalMin,
+    isHour: totalMin % 60 === 0,
+    // slot whose border-b IS the hour mark (the :40 slot just before each :00)
+    isPreHour: (totalMin + SLOT_MIN) % 60 === 0,
+  }
 })
 
 function timeToSlot(timeStr: string): number {
@@ -71,8 +77,6 @@ const TRACK_COLORS = [
 
 interface Props {
   conferenceId: number
-  onBack: () => void
-  onShowLogs: () => void
 }
 
 type DragItem = {
@@ -89,7 +93,7 @@ type DragOver = { hallId: number; dayId: number; slot: number } | null
 // SchedulePage
 // ---------------------------------------------------------------------------
 
-export default function SchedulePage({ conferenceId, onBack, onShowLogs }: Props) {
+export default function SchedulePage({ conferenceId }: Props) {
   const [conference, setConference] = useState<Conference | null>(null)
   const [loading, setLoading] = useState(true)
   const [dropError, setDropError] = useState('')
@@ -103,6 +107,8 @@ export default function SchedulePage({ conferenceId, onBack, onShowLogs }: Props
   const [addingUnassignedTalk, setAddingUnassignedTalk] = useState(false)
   const [editingTalk, setEditingTalk] = useState<{ talk: TalkItem; hall: Hall | null } | null>(null)
   const [editingBreak, setEditingBreak] = useState<{ br: BreakItem; hall: Hall } | null>(null)
+  const [addingTrack, setAddingTrack] = useState(false)
+  const [deletingTalk, setDeletingTalk] = useState<TalkItem | null>(null)
 
   const dragItemRef = useRef<DragItem | null>(null)
   const [dragOver, setDragOver] = useState<DragOver>(null)
@@ -119,6 +125,18 @@ export default function SchedulePage({ conferenceId, onBack, onShowLogs }: Props
   }
 
   useEffect(() => { fetchAll() }, []) // eslint-disable-line
+
+  // SSE auto-refresh — update when server pushes an event and no modal/drag is active
+  useEffect(() => {
+    const es = new EventSource(`/api/conferences/${conferenceId}/events`, { withCredentials: true })
+    es.onmessage = (e) => {
+      if (e.data !== 'update') return
+      const modalOpen = addingTalkFor || addingBreakFor || editingTalk || editingBreak ||
+        showHallForm || deletingHall || addingUnassignedTalk
+      if (!dragItemRef.current && !modalOpen) refresh()
+    }
+    return () => es.close()
+  }, [conferenceId, addingTalkFor, addingBreakFor, editingTalk, editingBreak, showHallForm, deletingHall, addingUnassignedTalk]) // eslint-disable-line
 
   // Auto-scroll when dragging near viewport edges
   useEffect(() => {
@@ -150,6 +168,14 @@ export default function SchedulePage({ conferenceId, onBack, onShowLogs }: Props
       cancelAnimationFrame(frame)
     }
   }, [])
+
+  const handleAddTrack = async (name: string, slots: number) => {
+    if (!conference) return
+    const existingTracks = conference.tracks.map((t) => ({ name: t.name, slots: t.slots }))
+    await updateConference(conference.id, { tracks: [...existingTracks, { name, slots }] })
+    await refresh()
+    setAddingTrack(false)
+  }
 
   const handleAddHall = async (data: { name: string; capacity: number }) => {
     if (!conference) return
@@ -261,8 +287,17 @@ export default function SchedulePage({ conferenceId, onBack, onShowLogs }: Props
     await refresh()
   }
 
-  const handleDeleteTalk = async (talk: TalkItem) => {
-    await deleteTalk(talk.id)
+  // In the schedule grid: unassign the talk (moves to "Нужно распределить")
+  const handleUnassignTalk = async (talk: TalkItem) => {
+    await updateTalk(talk.id, { hall_id: null, start_time: null, end_time: null })
+    await refresh()
+  }
+
+  // From the unassigned panel: permanent delete with confirm
+  const handleDeleteTalkPermanently = async () => {
+    if (!deletingTalk) return
+    await deleteTalk(deletingTalk.id)
+    setDeletingTalk(null)
     await refresh()
   }
   const handleDeleteBreak = async (br: BreakItem) => {
@@ -341,35 +376,7 @@ export default function SchedulePage({ conferenceId, onBack, onShowLogs }: Props
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center gap-4">
-          <button
-            onClick={onBack}
-            className="text-sm text-gray-500 hover:text-gray-900 transition-colors shrink-0"
-          >
-            ← Назад
-          </button>
-          <div className="h-4 w-px bg-gray-200 shrink-0" />
-          <span className="font-semibold text-gray-900 min-w-0 truncate">{conference.name}</span>
-          <span className="text-sm text-gray-400 shrink-0">📍 {conference.city}</span>
-          <div className="ml-auto flex items-center gap-2 shrink-0">
-            <button
-              onClick={onShowLogs}
-              className="px-3 py-1.5 text-sm font-medium text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
-            >
-              Логи
-            </button>
-            <button
-              onClick={() => setShowHallForm(true)}
-              className="px-3 py-1.5 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-            >
-              + Добавить зал
-            </button>
-          </div>
-        </div>
-      </header>
-
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-10">
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 pt-6 space-y-10">
         {dropError && (
           <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-2 text-sm text-red-700 flex justify-between items-center">
             <span>{dropError}</span>
@@ -377,7 +384,7 @@ export default function SchedulePage({ conferenceId, onBack, onShowLogs }: Props
           </div>
         )}
 
-        <TracksPanel conference={conference} collapsed={tracksCollapsed} onCollapse={() => setTracksCollapsed((v) => !v)} />
+        <TracksPanel conference={conference} collapsed={tracksCollapsed} onCollapse={() => setTracksCollapsed((v) => !v)} onAddTrack={() => setAddingTrack(true)} />
 
         <UnassignedTalksPanel
           conference={conference}
@@ -385,6 +392,7 @@ export default function SchedulePage({ conferenceId, onBack, onShowLogs }: Props
           onCollapse={() => setUnassignedCollapsed((v) => !v)}
           onAdd={() => setAddingUnassignedTalk(true)}
           onEdit={(talk) => setEditingTalk({ talk, hall: null })}
+          onDelete={(talk) => setDeletingTalk(talk)}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
         />
@@ -393,7 +401,7 @@ export default function SchedulePage({ conferenceId, onBack, onShowLogs }: Props
           <div className="bg-white rounded-2xl border border-dashed border-gray-300 p-12 text-center">
             <p className="text-gray-400 mb-3">Залов пока нет</p>
             <button onClick={() => setShowHallForm(true)} className="text-sm font-medium text-blue-600 hover:underline">
-              Добавить первый зал →
+              + Добавить зал
             </button>
           </div>
         )}
@@ -406,11 +414,12 @@ export default function SchedulePage({ conferenceId, onBack, onShowLogs }: Props
             tracks={conference.tracks}
             dragOver={dragOver}
             dragItem={dragItemRef.current}
+            onAddHall={() => setShowHallForm(true)}
             onAddTalk={(hall, startTime, endTime) => setAddingTalkFor({ hall, dayId: day.id, startTime, endTime })}
             onAddBreak={(hall, startTime, endTime) => setAddingBreakFor({ hall, dayId: day.id, startTime, endTime })}
             onEditTalk={(talk, hall) => setEditingTalk({ talk, hall })}
             onEditBreak={(br, hall) => setEditingBreak({ br, hall })}
-            onDeleteTalk={handleDeleteTalk}
+            onDeleteTalk={handleUnassignTalk}
             onDeleteBreak={handleDeleteBreak}
             onDeleteHall={setDeletingHall}
             onDragStart={handleDragStart}
@@ -479,11 +488,65 @@ export default function SchedulePage({ conferenceId, onBack, onShowLogs }: Props
           mode="edit"
           hallName={editingBreak.hall.name}
           initialStartTime={formatTime(editingBreak.br.start_time)}
-          initialEndTime={formatTime(editingBreak.br.end_time)}
+          initialEndTime={editingBreak.br.end_time ? formatTime(editingBreak.br.end_time) : ''}
           onSubmit={handleEditBreak}
           onClose={() => setEditingBreak(null)}
         />
       )}
+      {deletingTalk && (
+        <ConfirmDialog
+          message={`Удалить доклад «${deletingTalk.title}»? Это действие необратимо.`}
+          onConfirm={handleDeleteTalkPermanently}
+          onCancel={() => setDeletingTalk(null)}
+        />
+      )}
+      {addingTrack && <AddTrackModal onSubmit={handleAddTrack} onClose={() => setAddingTrack(false)} />}
+    </div>
+  )
+}
+
+function AddTrackModal({ onSubmit, onClose }: { onSubmit: (name: string, slots: number) => Promise<void>; onClose: () => void }) {
+  const [name, setName] = useState('')
+  const [slots, setSlots] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [onClose])
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!name.trim()) return
+    setSubmitting(true)
+    try { await onSubmit(name.trim(), Number(slots) || 0) } finally { setSubmitting(false) }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-sm mx-4 p-6">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Новый трек</h2>
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <input
+            required autoFocus value={name} onChange={(e) => setName(e.target.value)}
+            placeholder="Название трека"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <input
+            type="number" min={0} value={slots} onChange={(e) => setSlots(e.target.value)}
+            placeholder="Количество слотов"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <div className="flex justify-end gap-3 pt-1">
+            <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">Отмена</button>
+            <button type="submit" disabled={submitting} className="px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors">
+              {submitting ? 'Сохранение…' : 'Добавить'}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   )
 }
@@ -498,13 +561,14 @@ interface UnassignedTalksPanelProps {
   onCollapse: () => void
   onAdd: () => void
   onEdit: (talk: TalkItem) => void
+  onDelete: (talk: TalkItem) => void
   onDragStart: (item: DragItem) => void
   onDragEnd: () => void
 }
 
 const DEFAULT_UNASSIGNED_SLOTS = 2 // 40-min default duration for drag ghost
 
-function UnassignedTalksPanel({ conference, collapsed, onCollapse, onAdd, onEdit, onDragStart, onDragEnd }: UnassignedTalksPanelProps) {
+function UnassignedTalksPanel({ conference, collapsed, onCollapse, onAdd, onEdit, onDelete, onDragStart, onDragEnd }: UnassignedTalksPanelProps) {
   const unassigned = conference.days.flatMap((d) => d.talks).filter((t) => t.hall_id == null)
   const [draggingId, setDraggingId] = useState<number | null>(null)
 
@@ -525,7 +589,7 @@ function UnassignedTalksPanel({ conference, collapsed, onCollapse, onAdd, onEdit
         </button>
         <button
           onClick={onAdd}
-          className="text-xs text-blue-600 hover:text-blue-700 font-medium px-5 py-4 shrink-0"
+          className="text-xs text-blue-600 hover:text-blue-700 font-medium px-5 py-4 shrink-0 w-36 whitespace-nowrap"
         >
           + Добавить доклад
         </button>
@@ -555,7 +619,7 @@ function UnassignedTalksPanel({ conference, collapsed, onCollapse, onAdd, onEdit
                   onDragEnd()
                 }}
                 onClick={() => onEdit(talk)}
-                className={`px-3 py-1.5 rounded-lg text-sm font-medium border cursor-grab active:cursor-grabbing transition-opacity select-none ${
+                className={`group flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium border cursor-grab active:cursor-grabbing transition-opacity select-none ${
                   isDragging ? 'opacity-40' : ''
                 } ${
                   color
@@ -563,7 +627,13 @@ function UnassignedTalksPanel({ conference, collapsed, onCollapse, onAdd, onEdit
                     : 'bg-gray-50 border-gray-200 text-gray-700 hover:border-blue-300 hover:bg-blue-50'
                 }`}
               >
-                {talk.title}
+                <span>{talk.title}</span>
+                <button
+                  onClick={(e) => { e.stopPropagation(); onDelete(talk) }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity text-gray-400 hover:text-red-500 leading-none shrink-0"
+                  title="Удалить"
+                >✕</button>
               </div>
             )
           })}
@@ -589,7 +659,7 @@ function fmtSlots(n: number): string {
   return n % 1 === 0 ? String(n) : n.toFixed(1)
 }
 
-function TracksPanel({ conference, collapsed, onCollapse }: { conference: Conference; collapsed: boolean; onCollapse: () => void }) {
+function TracksPanel({ conference, collapsed, onCollapse, onAddTrack }: { conference: Conference; collapsed: boolean; onCollapse: () => void; onAddTrack: () => void }) {
   if (conference.tracks.length === 0) return null
 
   const allTalks = conference.days.flatMap((d) => d.talks).filter((t) => t.start_time != null)
@@ -604,13 +674,15 @@ function TracksPanel({ conference, collapsed, onCollapse }: { conference: Confer
 
   return (
     <div className="bg-white rounded-2xl border border-gray-200">
-      <button
-        onClick={onCollapse}
-        className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 rounded-2xl transition-colors"
-      >
-        <h3 className="text-sm font-semibold text-gray-700">Треки</h3>
-        <span className={`text-gray-400 transition-transform duration-200 ${collapsed ? '-rotate-90' : ''}`}>▾</span>
-      </button>
+      <div className="flex items-center justify-between">
+        <button onClick={onCollapse} className="flex items-center gap-2 flex-1 px-5 py-4 hover:bg-gray-50 rounded-tl-2xl transition-colors">
+          <h3 className="text-sm font-semibold text-gray-700">Треки</h3>
+          <span className={`text-gray-400 transition-transform duration-200 ${collapsed ? '-rotate-90' : ''}`}>▾</span>
+        </button>
+        <button onClick={onAddTrack} className="text-xs font-medium text-blue-600 hover:text-blue-700 transition-colors shrink-0 w-36 whitespace-nowrap px-5 py-4">
+          + Добавить трек
+        </button>
+      </div>
 
       {!collapsed && (
         <div className="space-y-3 px-5 pb-4">
@@ -658,6 +730,7 @@ interface DayGridProps {
   tracks: Track[]
   dragOver: DragOver
   dragItem: DragItem | null
+  onAddHall: () => void
   onAddTalk: (h: Hall, startTime: string, endTime: string) => void
   onAddBreak: (h: Hall, startTime: string, endTime: string) => void
   onEditTalk: (t: TalkItem, h: Hall) => void
@@ -671,20 +744,28 @@ interface DayGridProps {
   onSlotDrop: (hallId: number, dayId: number, slot: number) => void
 }
 
-function DayGrid({ day, halls, tracks, dragOver, dragItem, onAddTalk, onAddBreak, onEditTalk, onEditBreak, onDeleteTalk, onDeleteBreak, onDeleteHall, onDragStart, onDragEnd, onSlotDragOver, onSlotDrop }: DayGridProps) {
+function DayGrid({ day, halls, tracks, dragOver, dragItem, onAddHall, onAddTalk, onAddBreak, onEditTalk, onEditBreak, onDeleteTalk, onDeleteBreak, onDeleteHall, onDragStart, onDragEnd, onSlotDragOver, onSlotDrop }: DayGridProps) {
   const trackIndexMap = new Map(tracks.map((t, i) => [t.id, i]))
   const [collapsed, setCollapsed] = useState(false)
   if (halls.length === 0) return null
 
   return (
     <div>
-      <button
-        onClick={() => setCollapsed((c) => !c)}
-        className="flex items-center gap-2 mb-3 group"
-      >
-        <span className={`text-gray-400 transition-transform duration-200 ${collapsed ? '-rotate-90' : ''}`}>▾</span>
-        <h2 className="text-base font-semibold text-gray-700 capitalize group-hover:text-gray-900">{formatDate(day.date)}</h2>
-      </button>
+      <div className="flex items-center justify-between mb-3">
+        <button
+          onClick={() => setCollapsed((c) => !c)}
+          className="flex items-center gap-2 group"
+        >
+          <span className={`text-gray-400 transition-transform duration-200 ${collapsed ? '-rotate-90' : ''}`}>▾</span>
+          <h2 className="text-base font-semibold text-gray-700 capitalize group-hover:text-gray-900">{formatDate(day.date)}</h2>
+        </button>
+        <button
+          onClick={onAddHall}
+          className="text-xs font-medium text-blue-600 hover:text-blue-700 transition-colors w-36 whitespace-nowrap"
+        >
+          + Добавить зал
+        </button>
+      </div>
 
       {!collapsed && <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
         {/* Hall headers */}
@@ -709,18 +790,16 @@ function DayGrid({ day, halls, tracks, dragOver, dragItem, onAddTalk, onAddBreak
 
         {/* Grid body */}
         <div className="flex overflow-x-auto">
-          {/* Time column */}
-          <div className="w-14 shrink-0 select-none">
+          {/* Time column — each label sits 1px below its hour line */}
+          <div className="relative w-14 shrink-0 select-none" style={{ height: TOTAL_SLOTS * SLOT_H }}>
             {SLOTS.map((slot) => (
-              <div
+              <span
                 key={slot.index}
-                style={{ height: SLOT_H }}
-                className={`border-b flex items-start justify-end pr-2 pt-0.5 ${slot.isHour ? 'border-gray-200' : 'border-gray-100'}`}
+                className={`absolute right-2 text-xs leading-none ${slot.isHour ? 'text-gray-600 font-bold' : 'text-gray-300'}`}
+                style={{ top: Math.max(0, slot.index * SLOT_H - 4) }}
               >
-                <span className={`text-xs leading-none ${slot.isHour ? 'text-gray-500 font-medium' : 'text-gray-300'}`}>
-                  {formatSlotTime(slot.totalMin)}
-                </span>
-              </div>
+                {formatSlotTime(slot.totalMin)}
+              </span>
             ))}
           </div>
 
@@ -744,17 +823,17 @@ function DayGrid({ day, halls, tracks, dragOver, dragItem, onAddTalk, onAddBreak
                     <div
                       key={slot.index}
                       style={{ height: SLOT_H, top: slot.index * SLOT_H }}
-                      className={`absolute w-full border-b group/slot ${slot.isHour ? 'border-gray-200' : 'border-gray-100'}`}
+                      className={`absolute w-full group/slot border-b ${slot.isPreHour ? 'border-gray-300' : 'border-gray-100'}`}
                       onDragOver={(e) => { e.preventDefault(); onSlotDragOver(hall.id, day.id, slot.index) }}
                       onDrop={(e) => { e.preventDefault(); onSlotDrop(hall.id, day.id, slot.index) }}
                     >
                       <div className="absolute inset-0 flex items-center justify-center gap-1 opacity-0 group-hover/slot:opacity-100 transition-opacity pointer-events-none">
                         <button
-                          className="pointer-events-auto px-1.5 py-0.5 text-xs text-blue-600 bg-white border border-blue-200 rounded hover:bg-blue-50 transition-colors shadow-sm"
+                          className="pointer-events-auto px-1.5 py-0.5 text-sm font-medium text-blue-600 bg-white border border-blue-200 rounded hover:bg-blue-50 transition-colors shadow-sm"
                           onClick={(e) => { e.stopPropagation(); onAddTalk(hall, startTime, endTime) }}
                         >+ Доклад</button>
                         <button
-                          className="pointer-events-auto px-1.5 py-0.5 text-xs text-amber-600 bg-white border border-amber-200 rounded hover:bg-amber-50 transition-colors shadow-sm"
+                          className="pointer-events-auto px-1.5 py-0.5 text-sm font-medium text-amber-600 bg-white border border-amber-200 rounded hover:bg-amber-50 transition-colors shadow-sm"
                           onClick={(e) => { e.stopPropagation(); onAddBreak(hall, startTime, breakEndTime) }}
                         >+ Перерыв</button>
                       </div>
@@ -889,7 +968,7 @@ function TalkCard({ talk, dayId, startSlot, durationSlots, trackColorIndex, trac
       style={{ top: startSlot * SLOT_H + 2, height: durationSlots * SLOT_H - 4 }}
     >
       <div className="flex items-start justify-between gap-1">
-        <p className={`text-xs font-semibold ${c.text} leading-tight truncate`}>{talk.title}</p>
+        <p className={`text-xs font-semibold ${c.text} leading-tight break-words min-w-0`}>{talk.title}</p>
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(talk) }}
           onMouseDown={(e) => e.stopPropagation()}
