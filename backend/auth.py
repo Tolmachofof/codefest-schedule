@@ -118,5 +118,4 @@ def change_password(
     validate_password_length(data.new_password)
     current_user.hashed_password = hash_password(data.new_password)
     db.commit()
-    db.refresh(current_user)
     return current_user
