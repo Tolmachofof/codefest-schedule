@@ -16,7 +16,7 @@ export default function HallForm({ onSubmit, onClose }: Props) {
     setError('')
     setSubmitting(true)
     try {
-      await onSubmit({ name: name.trim(), capacity: Number(capacity) || 0 })
+      await onSubmit({ name: name.trim(), capacity: Number(capacity) })
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка сервера')

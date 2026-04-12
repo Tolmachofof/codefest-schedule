@@ -1,15 +1,15 @@
 import { useState, useEffect, FormEvent } from 'react'
-import type { Conference } from '../types'
+import type { ConferenceSummary } from '../types'
 import type { ConferencePayload } from '../api/conferences'
 
 interface Props {
   mode: 'create' | 'edit'
-  initial?: Conference
+  initial?: ConferenceSummary
   onSubmit: (data: ConferencePayload) => Promise<void>
   onClose: () => void
 }
 
-type TrackRow = { name: string; slots: string }
+type TrackRow = { id?: number; name: string; slots: string }
 
 const emptyTrack = (): TrackRow => ({ name: '', slots: '' })
 
@@ -20,7 +20,7 @@ export default function ConferenceForm({ mode, initial, onSubmit, onClose }: Pro
   const [endDate, setEndDate] = useState(initial?.end_date ?? '')
   const [tracks, setTracks] = useState<TrackRow[]>(
     initial?.tracks.length
-      ? initial.tracks.map((t) => ({ name: t.name, slots: String(t.slots) }))
+      ? initial.tracks.map((t) => ({ id: t.id, name: t.name, slots: String(t.slots) }))
       : [emptyTrack()]
   )
   const [error, setError] = useState('')
@@ -51,7 +51,7 @@ export default function ConferenceForm({ mode, initial, onSubmit, onClose }: Pro
       end_date: endDate,
       tracks: tracks
         .filter((t) => t.name.trim())
-        .map((t) => ({ name: t.name.trim(), slots: Number(t.slots) || 0 })),
+        .map((t) => ({ ...(t.id !== undefined && { id: t.id }), name: t.name.trim(), slots: Number(t.slots) || 0 })),
     }
 
     setSubmitting(true)

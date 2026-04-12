@@ -20,6 +20,15 @@ services:
       DATABASE_URL: postgresql://codefest:codefest@db:5432/codefest
       SECRET_KEY: ${SECRET_KEY}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      LLM_PROVIDER: ${LLM_PROVIDER:-yandex}
+      YANDEX_API_KEY: ${YANDEX_API_KEY:-}
+      YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-}
+      YANDEX_MODEL: ${YANDEX_MODEL:-yandexgpt/latest}
+      GIGACHAT_CREDENTIALS: ${GIGACHAT_CREDENTIALS:-}
+      GIGACHAT_SCOPE: ${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
+      GIGACHAT_MODEL: ${GIGACHAT_MODEL:-GigaChat-Pro}
+      KAITEN_BASE_URL: ${KAITEN_BASE_URL:-}
+      KAITEN_TOKEN: ${KAITEN_TOKEN:-}
     depends_on:
       db:
         condition: service_healthy

@@ -1,4 +1,4 @@
-"""Unit tests for main.py API endpoints."""
+"""Integration tests for API endpoints."""
 import pytest
 
 
@@ -115,96 +115,73 @@ class TestHalls:
 
 
 # ---------------------------------------------------------------------------
-# Talks — assigned
+# Talks (unassigned — placement через TalkPlacement)
 # ---------------------------------------------------------------------------
 
 class TestTalks:
-    def _setup(self, client):
+    def test_create_unassigned(self, client):
         conf = create_conference(client)
-        hall = create_hall(client, conf["id"])
-        day_id = first_day_id(conf)
-        return conf["id"], hall["id"], day_id
-
-    def _talk_payload(self, hall_id):
-        return {
-            "title": "Доклад 1",
-            "hall_id": hall_id,
-            "start_time": "10:00:00",
-            "end_time": "11:00:00",
-        }
-
-    def test_create(self, client):
-        conf_id, hall_id, day_id = self._setup(client)
-        r = client.post(f"/conferences/{conf_id}/days/{day_id}/talks",
-                        json=self._talk_payload(hall_id))
+        r = client.post(f"/conferences/{conf['id']}/talks", json={"title": "Без зала"})
         assert r.status_code == 201
-        assert r.json()["title"] == "Доклад 1"
+        data = r.json()
+        assert data["title"] == "Без зала"
+        # hall/time не возвращаются — они в TalkPlacement
+        assert "hall_id" not in data or data.get("hall_id") is None
 
-    def test_create_invalid_times(self, client):
-        conf_id, hall_id, day_id = self._setup(client)
-        payload = {**self._talk_payload(hall_id), "start_time": "11:00:00", "end_time": "10:00:00"}
-        r = client.post(f"/conferences/{conf_id}/days/{day_id}/talks", json=payload)
-        assert r.status_code == 422
+    def test_create_with_metadata(self, client):
+        conf = create_conference(client)
+        r = client.post(f"/conferences/{conf['id']}/talks", json={
+            "title": "Доклад с метаданными",
+            "speaker_name": "Иван Иванов",
+            "speaker_level": "senior",
+            "duration_minutes": 60,
+        })
+        assert r.status_code == 201
+        data = r.json()
+        assert data["speaker_name"] == "Иван Иванов"
+        assert data["speaker_level"] == "senior"
+        assert data["duration_minutes"] == 60
 
-    def test_create_hall_not_in_conference(self, client):
-        conf_id, _, day_id = self._setup(client)
-        payload = {**self._talk_payload(9999)}
-        r = client.post(f"/conferences/{conf_id}/days/{day_id}/talks", json=payload)
-        assert r.status_code == 400
+    def test_create_with_track(self, client):
+        conf = create_conference(client)
+        track_id = conf["tracks"][0]["id"]
+        r = client.post(f"/conferences/{conf['id']}/talks", json={
+            "title": "С треком",
+            "primary_track_id": track_id,
+        })
+        assert r.status_code == 201
+        assert r.json()["primary_track_id"] == track_id
 
-    def test_update(self, client):
-        conf_id, hall_id, day_id = self._setup(client)
-        talk = client.post(f"/conferences/{conf_id}/days/{day_id}/talks",
-                           json=self._talk_payload(hall_id)).json()
-        r = client.patch(f"/talks/{talk['id']}", json={"title": "Новый заголовок"})
+    def test_update_title(self, client):
+        conf = create_conference(client)
+        talk = client.post(f"/conferences/{conf['id']}/talks", json={"title": "Старый"}).json()
+        r = client.patch(f"/talks/{talk['id']}", json={"title": "Новый"})
         assert r.status_code == 200
-        assert r.json()["title"] == "Новый заголовок"
+        assert r.json()["title"] == "Новый"
+
+    def test_update_metadata(self, client):
+        conf = create_conference(client)
+        talk = client.post(f"/conferences/{conf['id']}/talks", json={"title": "Доклад"}).json()
+        r = client.patch(f"/talks/{talk['id']}", json={
+            "speaker_name": "Петров",
+            "relevance": 4,
+        })
+        assert r.status_code == 200
+        assert r.json()["speaker_name"] == "Петров"
+        assert r.json()["relevance"] == 4
 
     def test_delete(self, client):
-        conf_id, hall_id, day_id = self._setup(client)
-        talk = client.post(f"/conferences/{conf_id}/days/{day_id}/talks",
-                           json=self._talk_payload(hall_id)).json()
+        conf = create_conference(client)
+        talk = client.post(f"/conferences/{conf['id']}/talks", json={"title": "Удалить"}).json()
         r = client.delete(f"/talks/{talk['id']}")
         assert r.status_code == 204
 
     def test_delete_not_found(self, client):
         assert client.delete("/talks/9999").status_code == 404
 
-    def test_talk_overlaps_break(self, client):
-        conf_id, hall_id, day_id = self._setup(client)
-        # Create a break first
-        client.post(f"/conferences/{conf_id}/days/{day_id}/breaks",
-                    json={"hall_id": hall_id, "start_time": "10:30:00", "end_time": "11:00:00"})
-        # Talk fully overlaps the break
-        r = client.post(f"/conferences/{conf_id}/days/{day_id}/talks",
-                        json=self._talk_payload(hall_id))
-        assert r.status_code == 400
-
-
-# ---------------------------------------------------------------------------
-# Talks — unassigned
-# ---------------------------------------------------------------------------
-
-class TestUnassignedTalks:
-    def test_create_unassigned(self, client):
-        conf = create_conference(client)
-        r = client.post(f"/conferences/{conf['id']}/talks", json={"title": "Без зала"})
-        assert r.status_code == 201
-        data = r.json()
-        assert data["hall_id"] is None
-        assert data["start_time"] is None
-
-    def test_assign_hall_via_update(self, client):
-        conf = create_conference(client)
-        hall = create_hall(client, conf["id"])
-        talk = client.post(f"/conferences/{conf['id']}/talks", json={"title": "Без зала"}).json()
-        r = client.patch(f"/talks/{talk['id']}", json={
-            "hall_id": hall["id"],
-            "start_time": "10:00:00",
-            "end_time": "11:00:00",
-        })
-        assert r.status_code == 200
-        assert r.json()["hall_id"] == hall["id"]
+    def test_create_unknown_conference(self, client):
+        r = client.post("/conferences/9999/talks", json={"title": "Нет"})
+        assert r.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -233,18 +210,6 @@ class TestBreaks:
                         json=self._break_payload(hall_id, start="13:00:00", end="12:00:00"))
         assert r.status_code == 422
 
-    def test_break_overlaps_talk(self, client):
-        conf_id, hall_id, day_id = self._setup(client)
-        # Create a talk first
-        client.post(f"/conferences/{conf_id}/days/{day_id}/talks", json={
-            "title": "Доклад", "hall_id": hall_id,
-            "start_time": "12:00:00", "end_time": "13:00:00",
-        })
-        # Break fully inside the talk
-        r = client.post(f"/conferences/{conf_id}/days/{day_id}/breaks",
-                        json=self._break_payload(hall_id, "12:00:00", "13:00:00"))
-        assert r.status_code == 400
-
     def test_break_overlaps_break(self, client):
         conf_id, hall_id, day_id = self._setup(client)
         client.post(f"/conferences/{conf_id}/days/{day_id}/breaks",
@@ -252,6 +217,15 @@ class TestBreaks:
         r = client.post(f"/conferences/{conf_id}/days/{day_id}/breaks",
                         json=self._break_payload(hall_id))
         assert r.status_code == 400
+
+    def test_breaks_in_different_halls_do_not_conflict(self, client):
+        conf_id, hall1_id, day_id = self._setup(client)
+        hall2 = create_hall(client, conf_id, {"name": "Зал Б", "capacity": 100})
+        client.post(f"/conferences/{conf_id}/days/{day_id}/breaks",
+                    json=self._break_payload(hall1_id))
+        r = client.post(f"/conferences/{conf_id}/days/{day_id}/breaks",
+                        json=self._break_payload(hall2["id"]))
+        assert r.status_code == 201
 
     def test_update(self, client):
         conf_id, hall_id, day_id = self._setup(client)
@@ -270,6 +244,81 @@ class TestBreaks:
 
     def test_delete_not_found(self, client):
         assert client.delete("/breaks/9999").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Schedule versions
+# ---------------------------------------------------------------------------
+
+class TestScheduleVersions:
+    def _setup(self, client):
+        conf = create_conference(client)
+        create_hall(client, conf["id"])
+        return conf
+
+    def test_create_manual_version(self, client):
+        conf = self._setup(client)
+        r = client.post(f"/conferences/{conf['id']}/schedule/versions/manual")
+        assert r.status_code == 201
+        data = r.json()
+        assert data["is_active"] is False
+        assert data["placements"] == []
+
+    def test_list_versions(self, client):
+        conf = self._setup(client)
+        client.post(f"/conferences/{conf['id']}/schedule/versions/manual")
+        client.post(f"/conferences/{conf['id']}/schedule/versions/manual")
+        r = client.get(f"/conferences/{conf['id']}/schedule/versions")
+        assert r.status_code == 200
+        assert len(r.json()) == 2
+
+    def test_activate_version(self, client):
+        conf = self._setup(client)
+        v1 = client.post(f"/conferences/{conf['id']}/schedule/versions/manual").json()
+        v2 = client.post(f"/conferences/{conf['id']}/schedule/versions/manual").json()
+        r = client.post(f"/conferences/{conf['id']}/schedule/versions/{v1['id']}/activate")
+        assert r.status_code == 200
+        assert r.json()["is_active"] is True
+        # v2 должна стать неактивной
+        versions = client.get(f"/conferences/{conf['id']}/schedule/versions").json()
+        v2_updated = next(v for v in versions if v["id"] == v2["id"])
+        assert v2_updated["is_active"] is False
+
+    def test_delete_version(self, client):
+        conf = self._setup(client)
+        v = client.post(f"/conferences/{conf['id']}/schedule/versions/manual").json()
+        r = client.delete(f"/conferences/{conf['id']}/schedule/versions/{v['id']}")
+        assert r.status_code == 204
+        versions = client.get(f"/conferences/{conf['id']}/schedule/versions").json()
+        assert all(ver["id"] != v["id"] for ver in versions)
+
+    def test_add_and_remove_placement(self, client):
+        conf = self._setup(client)
+        hall = create_hall(client, conf["id"])
+        hall_id = hall["id"]
+        day_id = first_day_id(conf)
+        talk = client.post(f"/conferences/{conf['id']}/talks", json={"title": "Доклад"}).json()
+        v = client.post(f"/conferences/{conf['id']}/schedule/versions/manual").json()
+
+        # Добавляем размещение
+        r = client.post(
+            f"/conferences/{conf['id']}/schedule/versions/{v['id']}/talks",
+            json={
+                "talk_id": talk["id"],
+                "hall_id": hall_id,
+                "day_id": day_id,
+                "start_time": "10:00:00",
+                "end_time": "11:00:00",
+            },
+        )
+        assert r.status_code == 201
+        assert len(r.json()["placements"]) == 1
+
+        # Удаляем размещение
+        r = client.delete(
+            f"/conferences/{conf['id']}/schedule/versions/{v['id']}/talks/{talk['id']}"
+        )
+        assert r.status_code == 204
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +347,6 @@ class TestLogs:
 
 class TestAuth:
     def test_login_success(self, client, test_user):
-        # client fixture already logs in; test the login endpoint directly
         r = client.post("/auth/login", data={"username": "tester", "password": "password123"})
         assert r.status_code == 200
         assert r.json()["username"] == "tester"
@@ -344,47 +392,6 @@ class TestAuth:
     def test_protected_endpoint_without_auth(self):
         from fastapi.testclient import TestClient
         from main import app as _app
-        # Fresh client with no auth override
         with TestClient(_app) as c:
             r = c.get("/conferences")
         assert r.status_code == 401
-
-
-# ---------------------------------------------------------------------------
-# Overlap edge cases
-# ---------------------------------------------------------------------------
-
-class TestOverlapEdgeCases:
-    def _setup(self, client):
-        conf = create_conference(client)
-        hall = create_hall(client, conf["id"])
-        day_id = first_day_id(conf)
-        return conf["id"], hall["id"], day_id
-
-    def test_talks_in_different_halls_do_not_conflict(self, client):
-        conf_id, hall1_id, day_id = self._setup(client)
-        hall2 = create_hall(client, conf_id, {"name": "Зал Б", "capacity": 100})
-
-        # Break in hall1
-        client.post(f"/conferences/{conf_id}/days/{day_id}/breaks", json={
-            "hall_id": hall1_id, "start_time": "10:00:00", "end_time": "11:00:00"
-        })
-        # Talk at same time but in hall2 — should succeed
-        r = client.post(f"/conferences/{conf_id}/days/{day_id}/talks", json={
-            "title": "Доклад", "hall_id": hall2["id"],
-            "start_time": "10:00:00", "end_time": "11:00:00",
-        })
-        assert r.status_code == 201
-
-    def test_small_overlap_within_tolerance_is_allowed(self, client):
-        conf_id, hall_id, day_id = self._setup(client)
-        # Break 10:00–11:00
-        client.post(f"/conferences/{conf_id}/days/{day_id}/breaks", json={
-            "hall_id": hall_id, "start_time": "10:00:00", "end_time": "11:00:00"
-        })
-        # Talk 10:59:30–12:00 — overlaps by 30s which is within MAX_OVERLAP_SECONDS=60
-        r = client.post(f"/conferences/{conf_id}/days/{day_id}/talks", json={
-            "title": "Короткий перехлёст", "hall_id": hall_id,
-            "start_time": "10:59:30", "end_time": "12:00:00",
-        })
-        assert r.status_code == 201

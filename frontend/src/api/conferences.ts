@@ -1,4 +1,4 @@
-import type { Conference } from '../types'
+import type { Conference, ConferenceSummary } from '../types'
 
 const BASE = '/api'
 
@@ -25,10 +25,12 @@ export type ConferencePayload = {
   city: string
   start_date: string
   end_date: string
-  tracks: { name: string; slots: number }[]
+  tracks: { id?: number; name: string; slots: number }[]
 }
 
-export const getConferences = () => request<Conference[]>('/conferences')
+export const getConferences = () => request<ConferenceSummary[]>('/conferences')
+
+export const getConference = (id: number) => request<Conference>(`/conferences/${id}`)
 
 export const createConference = (data: ConferencePayload) =>
   request<Conference>('/conferences', { method: 'POST', body: JSON.stringify(data) })

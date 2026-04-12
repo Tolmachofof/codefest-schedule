@@ -1,15 +1,28 @@
 import { useState, useEffect } from 'react'
 import { getLogs, type LogEntry } from '../api/schedule'
 
+const PAGE_SIZE = 100
+
 export default function LogsPage() {
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
 
   const fetchLogs = async () => {
     setLoading(true)
-    const data = await getLogs()
+    const data = await getLogs(PAGE_SIZE, 0)
     setLogs(data)
+    setHasMore(data.length === PAGE_SIZE)
     setLoading(false)
+  }
+
+  const loadMore = async () => {
+    setLoadingMore(true)
+    const data = await getLogs(PAGE_SIZE, logs.length)
+    setLogs((prev) => [...prev, ...data])
+    setHasMore(data.length === PAGE_SIZE)
+    setLoadingMore(false)
   }
 
   useEffect(() => { fetchLogs() }, [])
@@ -43,14 +56,28 @@ export default function LogsPage() {
           <p className="text-gray-400">Операций пока нет</p>
         </div>
       ) : (
-        <div className="space-y-2">
-          {logs.map((log) => (
-            <div key={log.id} className="bg-white rounded-lg border border-gray-200 px-4 py-3 flex items-center gap-4">
-              <span className="text-xs text-gray-400 shrink-0 tabular-nums">{formatTime(log.timestamp)}</span>
-              <span className="text-sm text-gray-800">{log.action}</span>
+        <>
+          <div className="space-y-2">
+            {logs.map((log) => (
+              <div key={log.id} className="bg-white rounded-lg border border-gray-200 px-4 py-3 flex items-center gap-4">
+                <span className="text-xs text-gray-400 shrink-0 tabular-nums">{formatTime(log.timestamp)}</span>
+                <span className="text-sm text-gray-800">{log.action}</span>
+              </div>
+            ))}
+          </div>
+
+          {hasMore && (
+            <div className="flex justify-center mt-6">
+              <button
+                onClick={loadMore}
+                disabled={loadingMore}
+                className="px-4 py-2 text-sm text-blue-600 border border-blue-300 rounded-lg hover:bg-blue-50 disabled:opacity-50"
+              >
+                {loadingMore ? 'Загрузка...' : 'Загрузить ещё'}
+              </button>
             </div>
-          ))}
-        </div>
+          )}
+        </>
       )}
     </main>
   )

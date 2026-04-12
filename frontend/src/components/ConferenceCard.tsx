@@ -1,7 +1,7 @@
-import type { Conference } from '../types'
+import type { ConferenceSummary } from '../types'
 
 interface Props {
-  conference: Conference
+  conference: ConferenceSummary
   onClick: () => void
   onEdit: () => void
   onDelete: () => void

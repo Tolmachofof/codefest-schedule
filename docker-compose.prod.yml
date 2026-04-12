@@ -5,6 +5,12 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       SECRET_KEY: ${SECRET_KEY}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      YANDEX_API_KEY: ${YANDEX_API_KEY:-}
+      YANDEX_BASE_URL: ${YANDEX_BASE_URL:-}
+      YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-}
+      YANDEX_MODEL: ${YANDEX_MODEL:-yandexgpt/latest}
+      KAITEN_BASE_URL: ${KAITEN_BASE_URL:-}
+      KAITEN_TOKEN: ${KAITEN_TOKEN:-}
     restart: unless-stopped
 
   frontend:

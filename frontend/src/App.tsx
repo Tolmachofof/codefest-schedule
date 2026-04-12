@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { Conference } from './types'
+import type { ConferenceSummary } from './types'
 import {
   getConferences,
   createConference,
@@ -20,12 +20,12 @@ export default function App() {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [authChecked, setAuthChecked] = useState(false)
 
-  const [conferences, setConferences] = useState<Conference[]>([])
+  const [conferences, setConferences] = useState<ConferenceSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   const [formOpen, setFormOpen] = useState(false)
-  const [editing, setEditing] = useState<Conference | null>(null)
+  const [editing, setEditing] = useState<ConferenceSummary | null>(null)
   const [deletingId, setDeletingId] = useState<number | null>(null)
   const [scheduleId, setScheduleId] = useState<number | null>(null)
   const [activeTab, setActiveTab] = useState<'conferences' | 'logs' | 'settings'>('conferences')
@@ -88,7 +88,7 @@ export default function App() {
   }
 
   const openCreate = () => { setEditing(null); setFormOpen(true) }
-  const openEdit = (c: Conference) => { setEditing(c); setFormOpen(true) }
+  const openEdit = (c: ConferenceSummary) => { setEditing(c); setFormOpen(true) }
   const closeForm = () => { setFormOpen(false); setEditing(null) }
 
   // Waiting for auth check

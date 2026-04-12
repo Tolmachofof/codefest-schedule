@@ -21,6 +21,7 @@ dist/
 
 # Claude
 .claude/
+.ai/
 
 # Compiled JS artifacts next to TS sources
 frontend/src/**/*.js
